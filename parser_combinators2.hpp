@@ -8,6 +8,8 @@
 //      symbol, alpha, numeric, optional, many, choice, combine
 // 2026-01-27:
 //      Added collect, fmap functionalities
+// 2026-01-27:
+//      Added recursive parsers via Y-combinator
 
 #pragma once
 
@@ -19,7 +21,7 @@ namespace parser_combinators {
         using std::literals::string_view_literals::operator""sv;
 
         template <typename T>
-        concept ParserTrait = requires {
+        concept parser_trait = requires {
             T::parse(std::declval<std::string_view>());
         };
 
@@ -119,7 +121,7 @@ namespace parser_combinators {
             return (attrs & check) != parser_attribute::none;
         }
 
-        template <ParserTrait BaseParser, parser_attribute Attr>
+        template <parser_trait BaseParser, parser_attribute Attr>
         struct parser_decorator {
             static auto parse(std::string_view input) {
                 return BaseParser::parse(input);
@@ -185,7 +187,7 @@ namespace parser_combinators {
             }
         };
 
-        template <ParserTrait BaseParser>
+        template <parser_trait BaseParser>
         struct collect_parser {
             static auto parse(std::string_view input) {
                 auto [success, parsed, remaining] = BaseParser::parse(input);
@@ -197,7 +199,7 @@ namespace parser_combinators {
             }
         };
 
-        template <ParserTrait BaseParser>
+        template <parser_trait BaseParser>
         struct optional_parser {
             static auto parse(std::string_view input) {
                 using ElementType = typename decltype(BaseParser::parse(input))::value_type;
@@ -210,7 +212,7 @@ namespace parser_combinators {
             }
         };
 
-        template <ParserTrait BaseParser>
+        template <parser_trait BaseParser>
         struct many_parser {
             static auto parse(std::string_view input) {
                 using ElementType = typename decltype(BaseParser::parse(input))::value_type;
@@ -237,7 +239,7 @@ namespace parser_combinators {
             }
         };
 
-        template <ParserTrait... SubParsers>
+        template <parser_trait... SubParsers>
         consteval auto make_member_index_map() {
             constexpr auto attrs = std::array<std::meta::info, sizeof...(SubParsers)>{^^SubParsers...};
             std::array<int, sizeof...(SubParsers)> mapping{};
@@ -253,7 +255,7 @@ namespace parser_combinators {
             return mapping;
         }
 
-        template <ParserTrait... SubParsers>
+        template <parser_trait... SubParsers>
         consteval auto construct_return_tuple_type() {
             constexpr auto mapping = make_member_index_map<SubParsers...>();
             using SubParsersTuple = std::tuple<SubParsers...>;
@@ -272,7 +274,7 @@ namespace parser_combinators {
             return std::meta::substitute(^^std::tuple, std::define_static_array(types));
         }
 
-        template <ParserTrait BaseParser, auto Fmap>
+        template <parser_trait BaseParser, auto Fmap>
         struct fmap_parser {
             static auto parse(std::string_view input) {
                 auto result = BaseParser::parse(input);
@@ -291,77 +293,29 @@ namespace parser_combinators {
             }
         };
 
-        template <ParserTrait... SubParsers>
+        template <parser_trait... SubParsers>
         struct choice_parser {
             static auto parse(std::string_view input) {
                 using ParserOutputs = std::variant<typename decltype(SubParsers::parse(input))::value_type...>;
-                bool any_success = false;
 
-                ParserOutputs parsed_value;
+                const auto original_input = input;
                 template for (constexpr int i : std::define_static_array(details::make_index_array<sizeof...(SubParsers)>())) {
                     using SubParserTuple = std::tuple<SubParsers...>;
                     using SubParser = std::tuple_element_t<i, SubParserTuple>;
 
-                    auto result = SubParser::parse(input);
+                    auto result = SubParser::parse(original_input);
                     if (result.success) {
-                        any_success = true;
+                        ParserOutputs parsed_value;
                         parsed_value.template emplace<i>(std::move(result.parsed));
-                        input = result.remaining;
-                        break;
+                        return parse_success<ParserOutputs>(parsed_value, result.remaining);
                     }
                 }
 
-                if (!any_success) {
-                    return parse_failure<std::variant<typename decltype(SubParsers::parse(input))::value_type...>>(input);
-                }
-
-                return parse_success<std::variant<typename decltype(SubParsers::parse(input))::value_type...>>(parsed_value, input);
+                return parse_failure<std::variant<typename decltype(SubParsers::parse(input))::value_type...>>(input);
             }
         };
         
-        template <typename OutType, ParserTrait... SubParsers>
-        struct [[deprecated("struct_mapper_parser is deprecated, use sequential_parser with fmap functionalities")]] struct_mapper_parser {
-            static auto parse(std::string_view input) {
-                OutType output{};
-                std::string_view parse_remaining = input;
-
-                constexpr auto out_info = ^^OutType;
-                constexpr auto member_infos = std::define_static_array(std::meta::nonstatic_data_members_of(out_info,  std::meta::access_context::unchecked()));
-                constexpr auto subparser_infos = std::array<std::meta::info, sizeof...(SubParsers)>{^^SubParsers...};
-                
-                static_assert(member_infos.size() <= subparser_infos.size(), "Too many members in output type for the provided parsers");
-
-                constexpr auto member_index_map = std::define_static_array(make_member_index_map<SubParsers...>());
-
-                // why the fuck...
-                // this is just so cplusplus-ish
-                using SubParserTuple = std::tuple<SubParsers...>;
-                template for (constexpr int i : std::define_static_array(details::make_index_array<sizeof...(SubParsers)>())) {
-                    using SubParser = std::tuple_element_t<i, SubParserTuple>;
-                    constexpr auto split = split_parser_decorator(subparser_infos[i]);
-                    constexpr auto base_parser_info = split.first;
-                    constexpr auto attr = split.second;
-                    auto [succ, parsed, remaining] = SubParser::parse(parse_remaining);
-                    
-                    if (!succ) {
-                        return parse_failure<OutType>(input);
-                    }
-
-                    constexpr int target_idx = member_index_map[i];
-                    if constexpr (target_idx != -1) {
-                        constexpr auto member_info = member_infos[target_idx];
-                        output.[:member_info:] = parsed;
-                    }
-
-                    parse_remaining = remaining;
-                }
-
-                return parse_success<OutType>(output, parse_remaining);
-            }
-        };
-
-        
-        template <ParserTrait... SubParsers>
+        template <parser_trait... SubParsers>
         struct sequential_parser {
             static auto parse(std::string_view input) {
                 using ReturnTupleType = [:construct_return_tuple_type<SubParsers...>():];
@@ -458,7 +412,7 @@ namespace parser_combinators {
 
             // fmap
             template <auto Fmap>
-            consteval auto map() -> parser_wrapper {
+            consteval auto fmap() -> parser_wrapper {
                 parser_wrapper pw = *this;
                 pw.basic_parser = std::meta::substitute(
                     ^^fmap_parser,
@@ -467,27 +421,30 @@ namespace parser_combinators {
                 return pw;
             }
             
-            consteval auto parser() {
+            consteval auto parser() const {
                 return basic_parser;
             }
         };
 
-        struct combine_partial_parser {
-            std::vector<std::meta::info> parser_types;
+        
+        template <typename OutType, auto F>
+        struct y_combinator {
+            static auto parse(std::string_view input) -> parse_result<OutType> {
+                struct recurse_helper {
+                    static auto parse(std::string_view input) -> parse_result<OutType> {
+                        return y_combinator<OutType, F>::parse(input);
+                    }
+                };
 
-            template <typename OutType>
-            consteval auto map() {
-                std::vector<std::meta::info> types;
-                types.push_back(^^OutType);
-                types.reserve(types.size() + parser_types.size());
-                types.insert(types.end(), parser_types.begin(), parser_types.end());
+                static constexpr auto cached_parser = [] {
+                    constexpr auto wrapper = F(parser_wrapper{^^recurse_helper});
+                    return wrapper.basic_parser;
+                }();
 
-                auto combined_parser = std::meta::substitute(
-                    ^^details::struct_mapper_parser,
-                    types
-                );
-
-                return details::parser_wrapper{combined_parser};
+                // i just cant inline this, or clangd freaks out
+                // goddamn it
+                using parser = [:cached_parser:];
+                return parser::parse(input);
             }
         };
     }
@@ -569,6 +526,16 @@ namespace parser_combinators {
             return details::parser_wrapper{choice_parser};
         }
 
+        template <typename OutType, typename F>
+        consteval auto fix(F&& fn) {
+            auto parser_type = std::meta::substitute(
+                ^^details::y_combinator,
+                {^^OutType, std::meta::reflect_constant(fn)}
+            );
+
+            return details::parser_wrapper{parser_type};
+        }
+
         template <typename OutType>
         struct fmap_struct_t {
             auto operator()(auto&&... args) const {
@@ -586,6 +553,6 @@ namespace parser_combinators {
         };
 
         template <typename OutType>
-        constexpr fmap_struct_t<OutType> fmap_struct{};
+        constexpr auto fmap_struct = fmap_struct_t<OutType>{};
     }
 }
