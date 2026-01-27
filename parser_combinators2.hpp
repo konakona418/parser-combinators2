@@ -10,6 +10,7 @@
 //      Added collect, fmap functionalities
 // 2026-01-27:
 //      Added recursive parsers via Y-combinator
+//      Convenient dsl::fmap to prevent writing .template fmap<...>() everywhere
 
 #pragma once
 
@@ -411,8 +412,20 @@ namespace parser_combinators {
             }
 
             // fmap
+            // for constexpr lambdas and function pointers, etc
             template <auto Fmap>
             consteval auto fmap() -> parser_wrapper {
+                parser_wrapper pw = *this;
+                pw.basic_parser = std::meta::substitute(
+                    ^^fmap_parser,
+                    {pw.basic_parser, std::meta::reflect_constant(Fmap)}
+                );
+                return pw;
+            }
+
+            // still fmap
+            // for capture lambdas
+            consteval auto fmap(auto Fmap) -> parser_wrapper {
                 parser_wrapper pw = *this;
                 pw.basic_parser = std::meta::substitute(
                     ^^fmap_parser,
@@ -534,6 +547,17 @@ namespace parser_combinators {
             );
 
             return details::parser_wrapper{parser_type};
+        }
+
+        template <auto F>
+        struct fmap_helper {};
+
+        template <auto F>
+        constexpr inline auto fmap = fmap_helper<F>{};
+
+        template <typename ParserWrapper, auto F>
+        consteval auto operator|(ParserWrapper pw, fmap_helper<F>) {
+            return pw.template fmap<F>();
         }
 
         template <typename OutType>
