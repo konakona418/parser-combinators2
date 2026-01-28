@@ -5,6 +5,12 @@ This is a lightweight, header-only parser combinator library designed for C++26.
 
 For debugging, the library includes a non-intrusive hook system. By performing apply_hook on a parser, you can automatically generate execution traces to monitor how the engine traverses your grammar.
 
+__Do not use this for production purposes.__
+
+The few benchmark I performed suggests that, even with many application-level optimizations, the JSON parser can only consume input at around 30MB/s. A plain parser without optimization can only consume at around 5MB/s, even with custom allocators.
+
+The parser generator itself utilizes `std::tuple` `std::variant` etc, which have extremely poor performance. Perhaps with reflection I can generate simple tuple/variant structs at compile time, thus preventing the standard library shit. And the Y-combinator seems to have poor performance as well, which is quite absurd.
+
 Here's an example. Full code in `json_parser_example.cpp`.
 
 ```cpp
