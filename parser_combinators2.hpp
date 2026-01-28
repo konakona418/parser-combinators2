@@ -13,6 +13,7 @@
 //      Convenient dsl::fmap to prevent writing .template fmap<...>() everywhere
 // 2026-01-28:
 //      Some refactoring and cleanup
+//      Added parse_context for error reporting (not fully utilized yet)
 
 #pragma once
 
@@ -25,7 +26,7 @@ namespace parser_combinators {
 
         template <typename T>
         concept parser_trait = requires {
-            T::parse(std::declval<std::string_view>());
+            T::parse(std::declval<std::string_view>(), std::declval<struct parse_context&>());
         };
 
         template <typename T>
@@ -107,6 +108,19 @@ namespace parser_combinators {
             return parse_result<std::string_view>{false, std::string_view{}, remaining};
         }
 
+        struct parse_error {
+            std::string message;
+            size_t position;
+        };
+
+        struct parse_context {
+            std::vector<parse_error> errors;
+
+            void add_error(const std::string& message, size_t position) {
+                errors.push_back(parse_error{message, position});
+            }
+        };
+
         enum class parser_attribute : int {
             none = 0,
             discard = 1,
@@ -139,8 +153,8 @@ namespace parser_combinators {
         template <parser_trait BaseParser, parser_attribute Attr>
         struct parser_decorator {
             using value_type = typename BaseParser::value_type;
-            static auto parse(std::string_view input) {
-                return BaseParser::parse(input);
+            static auto parse(std::string_view input, parse_context& ctx) {
+                return BaseParser::parse(input, ctx);
             }
         };
 
@@ -158,7 +172,7 @@ namespace parser_combinators {
         template <string_literal Str>
         struct symbol_parser {
             using value_type = std::string_view;
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 constexpr auto s = Str.str();
                 if (!input.starts_with(s)) {
                     return parse_failure_s(input);
@@ -169,7 +183,7 @@ namespace parser_combinators {
 
         struct alpha_parser {
             using value_type = std::string_view;
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 if (input.empty() || !std::isalpha(input[0])) {
                     return parse_failure_s(input);
                 }
@@ -179,7 +193,7 @@ namespace parser_combinators {
 
         struct numeric_parser {
             using value_type = std::string_view;
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 if (input.empty() || !std::isdigit(input[0])) {
                     return parse_failure_s(input);
                 }
@@ -189,7 +203,7 @@ namespace parser_combinators {
 
         struct alphanumeric_parser {
             using value_type = std::string_view;
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 if (input.empty() || !std::isalnum(input[0])) {
                     return parse_failure_s(input);
                 }
@@ -199,7 +213,7 @@ namespace parser_combinators {
 
         struct whitespace_parser {
             using value_type = std::string_view;
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 size_t i = 0;
                 while (i < input.size() && std::isspace(input[i])) {
                     ++i;
@@ -211,8 +225,8 @@ namespace parser_combinators {
         template <parser_trait BaseParser>
         struct collect_parser {
             using value_type = std::string_view;
-            static auto parse(std::string_view input) {
-                auto [success, parsed, remaining] = BaseParser::parse(input);
+            static auto parse(std::string_view input, parse_context& ctx) {
+                auto [success, parsed, remaining] = BaseParser::parse(input, ctx);
                 if (!success) {
                     return parse_failure_s(input);
                 }
@@ -224,9 +238,9 @@ namespace parser_combinators {
         template <parser_trait BaseParser>
         struct optional_parser {
             using value_type = std::optional<typename BaseParser::value_type>;
-            static auto parse(std::string_view input) {
-                using ElementType = typename decltype(BaseParser::parse(input))::value_type;
-                auto result = BaseParser::parse(input);
+            static auto parse(std::string_view input, parse_context& ctx) {
+                using ElementType = typename decltype(BaseParser::parse(input, ctx))::value_type;
+                auto result = BaseParser::parse(input, ctx);
                 if (result.success) {
                     return parse_manual_unsafe<std::optional<ElementType>>(true, result.parsed, result.remaining);
                 } else {
@@ -238,13 +252,13 @@ namespace parser_combinators {
         template <parser_trait BaseParser>
         struct many_parser {
             using value_type = std::vector<typename BaseParser::value_type>;
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 using ElementType = typename BaseParser::value_type;
                 std::string_view remaining = input;
 
                 std::vector<ElementType> results;
                 while (true) {
-                    auto result = BaseParser::parse(remaining);
+                    auto result = BaseParser::parse(remaining, ctx);
                     if (!result.success || result.remaining == remaining) {
                         break;
                     }
@@ -258,7 +272,7 @@ namespace parser_combinators {
         template <string_literal Reason>
         struct invalid_parser {
             using value_type = void;
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 assert(false && "Invalid parser configuration");
                 return parse_failure<std::string_view>(input);
             }
@@ -301,8 +315,8 @@ namespace parser_combinators {
 
         template <parser_trait BaseParser, auto Fmap>
         struct fmap_parser {
-            static auto parse(std::string_view input) {
-                auto result = BaseParser::parse(input);
+            static auto parse(std::string_view input, parse_context& ctx) {
+                auto result = BaseParser::parse(input, ctx);
                 using mapped_type = decltype(apply_fmap(result.parsed));
                 if (!result.success) {
                     return parse_failure<mapped_type>(input);
@@ -324,7 +338,7 @@ namespace parser_combinators {
         template <parser_trait... SubParsers>
         struct choice_parser {
             using value_type = std::variant<typename SubParsers::value_type...>;
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 using ParserOutputs = value_type;
 
                 const auto original_input = input;
@@ -332,7 +346,7 @@ namespace parser_combinators {
                     using SubParserTuple = std::tuple<SubParsers...>;
                     using SubParser = std::tuple_element_t<i, SubParserTuple>;
 
-                    auto result = SubParser::parse(original_input);
+                    auto result = SubParser::parse(original_input, ctx);
                     if (result.success) {
                         ParserOutputs parsed_value;
                         parsed_value.template emplace<i>(std::move(result.parsed));
@@ -347,7 +361,7 @@ namespace parser_combinators {
         template <parser_trait... SubParsers>
         struct sequential_parser {
             using value_type = [:construct_return_tuple_type<SubParsers...>():];
-            static auto parse(std::string_view input) {
+            static auto parse(std::string_view input, parse_context& ctx) {
                 using ReturnTupleType = value_type;
                 using SubParsersTuple = std::tuple<SubParsers...>;
 
@@ -361,8 +375,7 @@ namespace parser_combinators {
                     constexpr auto split = split_parser_decorator(subparser_infos[i]);
                     constexpr auto base_parser_info = split.first;
                     constexpr auto attr = split.second;
-                    auto [succ, parsed, remaining] = SubParser::parse(parse_remaining);
-
+                    auto [succ, parsed, remaining] = SubParser::parse(parse_remaining, ctx);
                     if (!succ) {
                         return parse_failure<ReturnTupleType>(input);
                     }
@@ -470,11 +483,11 @@ namespace parser_combinators {
 
         template <typename OutType, auto F>
         struct y_combinator {
-            static auto parse(std::string_view input) -> parse_result<OutType> {
+            static auto parse(std::string_view input, parse_context& ctx) -> parse_result<OutType> {
                 struct recurse_helper {
                     using value_type = OutType;
-                    static auto parse(std::string_view input) -> parse_result<OutType> {
-                        return y_combinator<OutType, F>::parse(input);
+                    static auto parse(std::string_view input, parse_context& ctx) -> parse_result<OutType> {
+                        return y_combinator<OutType, F>::parse(input, ctx);
                     }
                 };
 
@@ -486,7 +499,7 @@ namespace parser_combinators {
                 // i just cant inline this, or clangd freaks out
                 // goddamn it
                 using parser = [:cached_parser:];
-                return parser::parse(input);
+                return parser::parse(input, ctx);
             }
         };
     }
