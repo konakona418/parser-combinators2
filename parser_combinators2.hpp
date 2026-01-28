@@ -15,6 +15,7 @@
 //      Some refactoring and cleanup
 //      Added parse_context for error reporting
 //      Added expect decorator for better error messages
+//      Added guard decorator for predicate checks
 
 #pragma once
 
@@ -279,6 +280,23 @@ namespace parser_combinators {
             }
         };
 
+        template <parser_trait BaseParser, auto Predicate>
+        struct guard_parser {
+            using value_type = BaseParser::value_type;
+            static auto parse(std::string_view input, parse_context& ctx) {
+                auto result = BaseParser::parse(input, ctx);
+                if (!result.success) {
+                    return parse_failure<typename BaseParser::value_type>(input);
+                }
+
+                if (!Predicate(result.parsed)) {
+                    ctx.add_error("Guard condition failed", input.data());
+                    return parse_failure<typename BaseParser::value_type>(input);
+                }
+                return result;
+            }
+        };
+
         template <parser_trait BaseParser>
         struct many_parser {
             using value_type = std::vector<typename BaseParser::value_type>;
@@ -430,14 +448,14 @@ namespace parser_combinators {
             bool is_many = false;
 
             // discard the result of this parser
-            consteval auto discard() -> parser_wrapper {
+            consteval auto discard() const -> parser_wrapper {
                 parser_wrapper pw = *this;
                 pw.should_discard = true;
                 return pw;
             }
 
             // maybe
-            consteval auto optional() -> parser_wrapper {
+            consteval auto optional() const -> parser_wrapper {
                 parser_wrapper pw = *this;
                 if (is_many) {
                     // many = 0..n, optional = 0..1, conflicting semantics
@@ -454,7 +472,7 @@ namespace parser_combinators {
             }
 
             template <string_literal Expect>
-            consteval auto expect() -> parser_wrapper {
+            consteval auto expect() const -> parser_wrapper {
                 parser_wrapper pw = *this;
                 pw.basic_parser = std::meta::substitute(
                     ^^expect_parser,
@@ -463,8 +481,18 @@ namespace parser_combinators {
                 return pw;
             }
 
+            template <auto Predicate>
+            consteval auto guard() const -> parser_wrapper {
+                parser_wrapper pw = *this;
+                pw.basic_parser = std::meta::substitute(
+                    ^^guard_parser,
+                    {pw.basic_parser, std::meta::reflect_constant(Predicate)}
+                );
+                return pw;
+            }
+
             // 0..n
-            consteval auto many() -> parser_wrapper {
+            consteval auto many() const -> parser_wrapper {
                 parser_wrapper pw = *this;
                 if (is_optional) {
                     // same
@@ -483,7 +511,7 @@ namespace parser_combinators {
             // collect the raw input consumed by this parser
             // note that this will override many/optional settings
             // as well as any structural outputs
-            consteval auto collect() -> parser_wrapper {
+            consteval auto collect() const -> parser_wrapper {
                 parser_wrapper pw = *this;
                 pw.is_many = false;
                 pw.is_optional = false;
@@ -497,7 +525,7 @@ namespace parser_combinators {
             // fmap
             // for constexpr lambdas and function pointers, etc
             template <auto Fmap>
-            consteval auto fmap() -> parser_wrapper {
+            consteval auto fmap() const -> parser_wrapper {
                 parser_wrapper pw = *this;
                 pw.basic_parser = std::meta::substitute(
                     ^^fmap_parser,
@@ -508,7 +536,7 @@ namespace parser_combinators {
 
             // still fmap
             // for capture lambdas
-            consteval auto fmap(auto Fmap) -> parser_wrapper {
+            consteval auto fmap(auto Fmap) const -> parser_wrapper {
                 parser_wrapper pw = *this;
                 pw.basic_parser = std::meta::substitute(
                     ^^fmap_parser,
@@ -679,6 +707,17 @@ namespace parser_combinators {
             return pw.template fmap<F>();
         }
 
+        template <auto P>
+        struct guard_helper {};
+
+        template <auto P>
+        constexpr inline auto guard = guard_helper<P>{};
+
+        template <typename ParserWrapper, auto P>
+        consteval auto operator|(ParserWrapper pw, guard_helper<P>) {
+            return pw.template guard<P>();
+        }
+
         template <typename F>
         struct lazy_helper {
             F func;
@@ -710,6 +749,20 @@ namespace parser_combinators {
 
         template <typename OutType>
         constexpr auto fmap_struct = fmap_struct_t<OutType>{};
+    }
+
+    namespace preds {
+        constexpr auto always_true = [](auto&&...) {
+            return true;
+        };
+
+        constexpr auto always_false = [](auto&&...) {
+            return false;
+        };
+
+        constexpr auto not_empty = [](auto&& val) {
+            return !val.empty();
+        };
     }
 
     constexpr auto context() {
