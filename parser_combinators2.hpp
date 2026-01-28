@@ -13,7 +13,8 @@
 //      Convenient dsl::fmap to prevent writing .template fmap<...>() everywhere
 // 2026-01-28:
 //      Some refactoring and cleanup
-//      Added parse_context for error reporting (not fully utilized yet)
+//      Added parse_context for error reporting
+//      Added expect decorator for better error messages
 
 #pragma once
 
@@ -110,14 +111,26 @@ namespace parser_combinators {
 
         struct parse_error {
             std::string message;
-            size_t position;
+            uintptr_t ptr_pos = 0;
+
+            size_t diff(const char* base_ptr) const {
+                return ptr_pos - reinterpret_cast<uintptr_t>(base_ptr);
+            }
         };
 
         struct parse_context {
-            std::vector<parse_error> errors;
+            parse_error error;
 
-            void add_error(const std::string& message, size_t position) {
-                errors.push_back(parse_error{message, position});
+            void add_error(std::string_view message, const char* ptr_position) {
+                if (error.ptr_pos <= reinterpret_cast<uintptr_t>(ptr_position)) {
+                    // only record the farthest error
+                    error.message = message;
+                    error.ptr_pos = reinterpret_cast<uintptr_t>(ptr_position);
+                }
+            }
+
+            void reset() {
+                error = parse_error{};
             }
         };
 
@@ -175,6 +188,7 @@ namespace parser_combinators {
             static auto parse(std::string_view input, parse_context& ctx) {
                 constexpr auto s = Str.str();
                 if (!input.starts_with(s)) {
+                    ctx.add_error("Expected symbol: " + std::string(s), input.data());
                     return parse_failure_s(input);
                 } 
                 return parse_success_s(input.substr(0, s.size()), input.substr(s.size()));
@@ -185,6 +199,7 @@ namespace parser_combinators {
             using value_type = std::string_view;
             static auto parse(std::string_view input, parse_context& ctx) {
                 if (input.empty() || !std::isalpha(input[0])) {
+                    ctx.add_error("Expected alphabetic character", input.data());
                     return parse_failure_s(input);
                 }
                 return parse_success_s(input.substr(0, 1), input.substr(1));
@@ -195,6 +210,7 @@ namespace parser_combinators {
             using value_type = std::string_view;
             static auto parse(std::string_view input, parse_context& ctx) {
                 if (input.empty() || !std::isdigit(input[0])) {
+                    ctx.add_error("Expected numeric character", input.data());
                     return parse_failure_s(input);
                 }
                 return parse_success_s(input.substr(0, 1), input.substr(1));
@@ -205,6 +221,7 @@ namespace parser_combinators {
             using value_type = std::string_view;
             static auto parse(std::string_view input, parse_context& ctx) {
                 if (input.empty() || !std::isalnum(input[0])) {
+                    ctx.add_error("Expected alphanumeric character", input.data());
                     return parse_failure_s(input);
                 }
                 return parse_success_s(input.substr(0, 1), input.substr(1));
@@ -214,11 +231,11 @@ namespace parser_combinators {
         struct whitespace_parser {
             using value_type = std::string_view;
             static auto parse(std::string_view input, parse_context& ctx) {
-                size_t i = 0;
-                while (i < input.size() && std::isspace(input[i])) {
-                    ++i;
+                if (input.empty() || !std::isspace(input[0])) {
+                    
+                    return parse_failure_s(input);
                 }
-                return parse_success_s(input.substr(0, i), input.substr(i));
+                return parse_success_s(input.substr(0, 1), input.substr(1));
             }
         };
 
@@ -249,6 +266,19 @@ namespace parser_combinators {
             }
         };
 
+        template <string_literal Expect, parser_trait BaseParser>
+        struct expect_parser {
+            using value_type = typename BaseParser::value_type;
+            static auto parse(std::string_view input, parse_context& ctx) {
+                auto result = BaseParser::parse(input, ctx);
+                if (!result.success) {
+                    ctx.add_error(std::string(Expect.str()), input.data());
+                    return parse_failure<typename BaseParser::value_type>(input);
+                }
+                return result;
+            }
+        };
+
         template <parser_trait BaseParser>
         struct many_parser {
             using value_type = std::vector<typename BaseParser::value_type>;
@@ -271,9 +301,10 @@ namespace parser_combinators {
 
         template <string_literal Reason>
         struct invalid_parser {
-            using value_type = void;
+            using value_type = std::string_view;
             static auto parse(std::string_view input, parse_context& ctx) {
                 assert(false && "Invalid parser configuration");
+                ctx.add_error("Invalid parser configuration: " + std::string(Reason.str()), input.data());
                 return parse_failure<std::string_view>(input);
             }
         };
@@ -418,6 +449,16 @@ namespace parser_combinators {
                 pw.basic_parser = std::meta::substitute(
                     ^^optional_parser,
                     {pw.basic_parser}
+                );
+                return pw;
+            }
+
+            template <string_literal Expect>
+            consteval auto expect() -> parser_wrapper {
+                parser_wrapper pw = *this;
+                pw.basic_parser = std::meta::substitute(
+                    ^^expect_parser,
+                    {std::meta::reflect_constant(Expect), pw.basic_parser}
                 );
                 return pw;
             }
@@ -670,4 +711,17 @@ namespace parser_combinators {
         template <typename OutType>
         constexpr auto fmap_struct = fmap_struct_t<OutType>{};
     }
+
+    constexpr auto context() {
+        return details::parse_context{};
+    }
+
+    template <details::parser_wrapper ParserWrapper>
+    struct parser {
+        using parser_type = [:ParserWrapper.parser():];
+
+        static auto parse(std::string_view input, details::parse_context& ctx) {
+            return parser_type::parse(input, ctx);
+        }
+    };
 }
