@@ -18,6 +18,7 @@
 //      Added guard decorator for predicate checks
 //      Added commit decorator for committed parsing
 //      Added parser hooks for tracing
+//      Minor optimizations and bug fixes
 
 #pragma once
 
@@ -658,6 +659,7 @@ namespace parser_combinators {
 
         template <typename OutType, auto F>
         struct y_combinator {
+            using value_type = OutType;
             static auto parse(std::string_view input, parse_context& ctx) -> parse_result<OutType> {
                 struct recurse_helper {
                     using value_type = OutType;
@@ -700,6 +702,8 @@ namespace parser_combinators {
             else if constexpr (Parser == ^^details::sequential_parser) return details::string_literal("sequential_parser");
             else if constexpr (Parser == ^^details::choice_parser) return details::string_literal("choice_parser");
             else if constexpr (Parser == ^^details::parser_decorator) return details::string_literal("parser_decorator");
+            else if constexpr (Parser == ^^details::optional_parser) return details::string_literal("optional_parser");
+            else if constexpr (Parser == ^^details::y_combinator) return details::string_literal("y_combinator");
 
             //else if constexpr (Parser == ^^details::symbol_parser) return details::string_literal("symbol_parser");
             else if constexpr (Parser == ^^details::alpha_parser) return details::string_literal("alpha_parser");
@@ -943,7 +947,8 @@ namespace parser_combinators {
                 return details::parser_wrapper{
                     std::meta::substitute(parser_template, { hooked_inner.parser(), attr_info })
                 };
-            } else if constexpr (parser_template == ^^details::fmap_parser || parser_template == ^^details::many_parser || 
+            } else if constexpr (parser_template == ^^details::fmap_parser ||
+                parser_template == ^^details::optional_parser || parser_template == ^^details::many_parser || 
                 parser_template == ^^details::expect_parser || parser_template == ^^details::guard_parser ||
                 parser_template == ^^details::commit_parser || parser_template == ^^details::collect_parser) {
                 constexpr auto args = std::define_static_array(std::meta::template_arguments_of(parser_info));
@@ -960,6 +965,21 @@ namespace parser_combinators {
                 return details::parser_wrapper{
                     std::meta::substitute(^^details::hooked_parser, 
                         {std::meta::reflect_constant(name_lit), std::meta::substitute(parser_template, infos)})
+                };
+            } else if constexpr (parser_template == ^^details::y_combinator) {
+                constexpr auto args = std::define_static_array(std::meta::template_arguments_of(parser_info));
+
+                // y_combinator<OutType, F>, dont change anything, just wrap
+                // otherwise infinite recursion
+                // and actually, we cant peek into F...
+                return details::parser_wrapper{
+                    std::meta::substitute(
+                        ^^details::hooked_parser,
+                        {
+                            std::meta::reflect_constant(details::string_literal("y_combinator")),
+                            parser_info
+                        }
+                    )
                 };
             }
         }
