@@ -17,6 +17,7 @@
 //      Added expect decorator for better error messages
 //      Added guard decorator for predicate checks
 //      Added commit decorator for committed parsing
+//      Added parser hooks for tracing
 
 #pragma once
 
@@ -41,16 +42,24 @@ namespace parser_combinators {
         struct string_literal {
             char value[N];
 
+            constexpr string_literal() : value{} {}
+
             constexpr string_literal(const char (&str)[N]) {
-                for (std::size_t i = 0; i < N; ++i) {
-                    value[i] = str[i];
-                }
+                std::copy_n(str, N, value);
             }
 
             constexpr std::string_view str() const {
                 return std::string_view(value, N - 1);
             }
         };
+
+        template <size_t SVSize>
+        consteval auto string_view_to_literal(const char* sv_data) {
+            string_literal<SVSize + 1> lit{};
+            std::copy_n(sv_data, SVSize, lit.value);
+            lit.value[SVSize] = '\0';
+            return lit;
+        }
 
         template <typename T, size_t N>
         struct list_wrapper {
@@ -112,6 +121,14 @@ namespace parser_combinators {
             return parse_result<std::string_view>{false, false, std::string_view{}, remaining};
         }
 
+        struct parser_hook {
+            virtual ~parser_hook() = default;
+            virtual void on_success(std::string_view name, std::string_view remaining) {}
+            virtual void on_failure(std::string_view name, std::string_view remaining) {}
+            virtual void on_enter(std::string_view name, std::string_view input) {}
+            virtual void on_exit(std::string_view name, std::string_view input) {}
+        };
+
         struct parse_error {
             std::string message;
             uintptr_t ptr_pos = 0;
@@ -123,6 +140,7 @@ namespace parser_combinators {
 
         struct parse_context {
             parse_error error;
+            parser_hook* hook = nullptr;
 
             void add_error(std::string_view message, const char* ptr_position) {
                 if (error.ptr_pos <= reinterpret_cast<uintptr_t>(ptr_position)) {
@@ -134,6 +152,34 @@ namespace parser_combinators {
 
             void reset() {
                 error = parse_error{};
+            }
+
+            void set_hook(parser_hook* new_hook) {
+                hook = new_hook;
+            }
+
+            void hook_on_success(std::string_view name, std::string_view remaining) {
+                if (hook) {
+                    hook->on_success(name, remaining);
+                }
+            }
+
+            void hook_on_failure(std::string_view name, std::string_view remaining) {
+                if (hook) {
+                    hook->on_failure(name, remaining);
+                }
+            }
+
+            void hook_on_enter(std::string_view name, std::string_view input) {
+                if (hook) {
+                    hook->on_enter(name, input);
+                }
+            }
+
+            void hook_on_exit(std::string_view name, std::string_view input) {
+                if (hook) {
+                    hook->on_exit(name, input);
+                }
             }
         };
 
@@ -269,7 +315,7 @@ namespace parser_combinators {
             }
         };
 
-        template <string_literal Expect, parser_trait BaseParser>
+        template <parser_trait BaseParser, string_literal Expect>
         struct expect_parser {
             using value_type = typename BaseParser::value_type;
             static auto parse(std::string_view input, parse_context& ctx) {
@@ -311,6 +357,22 @@ namespace parser_combinators {
                 auto res = parse_manual_unsafe<typename BaseParser::value_type>(true, result.parsed, result.remaining);
                 res.committed = true;
                 return res;
+            }
+        };
+
+        template <string_literal Name, parser_trait BaseParser>
+        struct hooked_parser {
+            using value_type = typename BaseParser::value_type;
+            static auto parse(std::string_view input, parse_context& ctx) {
+                ctx.hook_on_enter(Name.str(), input);
+                auto result = BaseParser::parse(input, ctx);
+                if (result.success) {
+                    ctx.hook_on_success(Name.str(), result.remaining);
+                } else {
+                    ctx.hook_on_failure(Name.str(), result.remaining);
+                }
+                ctx.hook_on_exit(Name.str(), result.remaining);
+                return result;
             }
         };
 
@@ -511,7 +573,7 @@ namespace parser_combinators {
                 parser_wrapper pw = *this;
                 pw.basic_parser = std::meta::substitute(
                     ^^expect_parser,
-                    {std::meta::reflect_constant(Expect), pw.basic_parser}
+                    {pw.basic_parser, std::meta::reflect_constant(Expect)}
                 );
                 return pw;
             }
@@ -615,6 +677,37 @@ namespace parser_combinators {
                 return parser::parse(input, ctx);
             }
         };
+
+        template <std::meta::info Parser>
+        consteval auto pretty_name() {
+            if constexpr (std::meta::has_template_arguments(Parser) && std::meta::template_of(Parser) == ^^details::symbol_parser) {
+                // symbol<string_literal<nsize>>
+                constexpr auto args = std::define_static_array(std::meta::template_arguments_of(Parser));
+                // -> string_literal<nsize>
+                constexpr auto symbol_name_constant = args[0];
+                // -> nsize... fuck, this is just so annoying
+                constexpr auto symbol_name_size = std::meta::extract<size_t>(std::meta::template_arguments_of(std::meta::type_of(symbol_name_constant))[0]);
+                constexpr auto symbol_name = std::meta::extract<details::string_literal<symbol_name_size>>(symbol_name_constant);
+                constexpr auto symbol_str = "symbol_parser(\"" + std::string(symbol_name.str()) + "\")";
+                return details::string_view_to_literal<symbol_str.size()>(symbol_str.data());
+            } else if constexpr (Parser == ^^details::fmap_parser) return details::string_literal("fmap_parser");
+            else if constexpr (Parser == ^^details::many_parser) return details::string_literal("many_parser");
+            else if constexpr (Parser == ^^details::expect_parser) return details::string_literal("expect_parser");
+            else if constexpr (Parser == ^^details::guard_parser) return details::string_literal("guard_parser");
+            else if constexpr (Parser == ^^details::commit_parser) return details::string_literal("commit_parser");
+            else if constexpr (Parser == ^^details::collect_parser) return details::string_literal("collect_parser");
+            else if constexpr (Parser == ^^details::hooked_parser) return details::string_literal("hooked_parser");
+            else if constexpr (Parser == ^^details::sequential_parser) return details::string_literal("sequential_parser");
+            else if constexpr (Parser == ^^details::choice_parser) return details::string_literal("choice_parser");
+            else if constexpr (Parser == ^^details::parser_decorator) return details::string_literal("parser_decorator");
+
+            //else if constexpr (Parser == ^^details::symbol_parser) return details::string_literal("symbol_parser");
+            else if constexpr (Parser == ^^details::alpha_parser) return details::string_literal("alpha_parser");
+            else if constexpr (Parser == ^^details::numeric_parser) return details::string_literal("numeric_parser");
+            else if constexpr (Parser == ^^details::alphanumeric_parser) return details::string_literal("alphanumeric_parser");
+            else if constexpr (Parser == ^^details::whitespace_parser) return details::string_literal("whitespace_parser");
+            else return details::string_literal("unknown_parser");
+        }
     }
 
     namespace dsl {
@@ -821,4 +914,60 @@ namespace parser_combinators {
             return parser_type::parse(input, ctx);
         }
     };
+
+    template <details::parser_wrapper pw>
+    consteval auto apply_hook() {
+        constexpr auto parser_info = pw.parser();
+        if constexpr (std::meta::has_template_arguments(parser_info)) {
+            constexpr auto parser_template = std::meta::template_of(parser_info);
+            if constexpr (parser_template == ^^details::hooked_parser) {
+                return pw;
+            } else if constexpr (parser_template == ^^details::sequential_parser ||
+                        parser_template == ^^details::choice_parser) {
+                // apply to each sub-parser
+                constexpr auto args = std::define_static_array(std::meta::template_arguments_of(parser_info));
+                std::vector<std::meta::info> new_args;
+                template for (constexpr auto arg : args) {
+                    new_args.push_back(apply_hook<details::parser_wrapper{arg}>().parser());
+                }
+                return details::parser_wrapper{ std::meta::substitute(parser_template, new_args) };
+            } else if constexpr (parser_template == ^^details::parser_decorator) {
+                constexpr auto args = std::define_static_array(std::meta::template_arguments_of(parser_info));
+
+                // parser_decorator<BaseParser, Attr>
+                constexpr details::parser_wrapper inner_pw{args[0]};
+                constexpr auto attr_info = args[1];
+
+                constexpr auto hooked_inner = apply_hook<inner_pw>();
+
+                return details::parser_wrapper{
+                    std::meta::substitute(parser_template, { hooked_inner.parser(), attr_info })
+                };
+            } else if constexpr (parser_template == ^^details::fmap_parser || parser_template == ^^details::many_parser || 
+                parser_template == ^^details::expect_parser || parser_template == ^^details::guard_parser ||
+                parser_template == ^^details::commit_parser || parser_template == ^^details::collect_parser) {
+                constexpr auto args = std::define_static_array(std::meta::template_arguments_of(parser_info));
+                constexpr details::parser_wrapper inner_pw{args[0]};
+
+                std::vector<std::meta::info> infos;
+                infos.push_back(apply_hook<inner_pw>().parser());// parser info
+                infos.insert(infos.end(), args.begin() + 1, args.end()); // other args
+
+                constexpr auto name = std::meta::display_string_of(parser_template);
+                constexpr auto name_size = name.size();
+                constexpr auto name_lit = details::string_view_to_literal<name_size>(name.data());
+
+                return details::parser_wrapper{
+                    std::meta::substitute(^^details::hooked_parser, 
+                        {std::meta::reflect_constant(name_lit), std::meta::substitute(parser_template, infos)})
+                };
+            }
+        }
+        // other parser types, just wrap with hooked_parser
+        constexpr auto name_lit = details::pretty_name<parser_info>();
+        return details::parser_wrapper{
+            std::meta::substitute(^^details::hooked_parser, 
+                {std::meta::reflect_constant(name_lit), parser_info})
+        };
+    }
 }
