@@ -16,6 +16,7 @@
 //      Added parse_context for error reporting
 //      Added expect decorator for better error messages
 //      Added guard decorator for predicate checks
+//      Added commit decorator for committed parsing
 
 #pragma once
 
@@ -83,31 +84,32 @@ namespace parser_combinators {
             using value_type = OutType;
 
             bool success;
+            bool committed;
             OutType parsed;
             std::string_view remaining;
         };
 
         template <typename OutType>
         constexpr auto parse_success(OutType parsed, std::string_view remaining) {
-            return parse_result<OutType>{true, parsed, remaining};
+            return parse_result<OutType>{true, false, parsed, remaining};
         }
 
         template <typename OutType>
         constexpr auto parse_failure(std::string_view remaining) {
-            return parse_result<OutType>{false, OutType{}, remaining};
+            return parse_result<OutType>{false, false, OutType{}, remaining};
         }
 
         template <typename OutType>
         constexpr auto parse_manual_unsafe(bool success, OutType parsed, std::string_view remaining) {
-            return parse_result<OutType>{success, parsed, remaining};
+            return parse_result<OutType>{success, false, parsed, remaining};
         }
 
         constexpr auto parse_success_s(std::string_view parsed, std::string_view remaining) {
-            return parse_result<std::string_view>{true, parsed, remaining};
+            return parse_result<std::string_view>{true, false, parsed, remaining};
         }
 
         constexpr auto parse_failure_s(std::string_view remaining) {
-            return parse_result<std::string_view>{false, std::string_view{}, remaining};
+            return parse_result<std::string_view>{false, false, std::string_view{}, remaining};
         }
 
         struct parse_error {
@@ -244,7 +246,7 @@ namespace parser_combinators {
         struct collect_parser {
             using value_type = std::string_view;
             static auto parse(std::string_view input, parse_context& ctx) {
-                auto [success, parsed, remaining] = BaseParser::parse(input, ctx);
+                auto [success, committed, parsed, remaining] = BaseParser::parse(input, ctx);
                 if (!success) {
                     return parse_failure_s(input);
                 }
@@ -294,6 +296,21 @@ namespace parser_combinators {
                     return parse_failure<typename BaseParser::value_type>(input);
                 }
                 return result;
+            }
+        };
+
+        template <parser_trait BaseParser>
+        struct commit_parser {
+            using value_type = typename BaseParser::value_type;
+            static auto parse(std::string_view input, parse_context& ctx) {
+                auto result = BaseParser::parse(input, ctx);
+                if (!result.success) {
+                    return parse_failure<typename BaseParser::value_type>(input);
+                }
+
+                auto res = parse_manual_unsafe<typename BaseParser::value_type>(true, result.parsed, result.remaining);
+                res.committed = true;
+                return res;
             }
         };
 
@@ -395,11 +412,16 @@ namespace parser_combinators {
                     using SubParserTuple = std::tuple<SubParsers...>;
                     using SubParser = std::tuple_element_t<i, SubParserTuple>;
 
-                    auto result = SubParser::parse(original_input, ctx);
-                    if (result.success) {
+                    auto [succ, committed, parsed, remaining] = SubParser::parse(original_input, ctx);
+                    if (succ) {
                         ParserOutputs parsed_value;
-                        parsed_value.template emplace<i>(std::move(result.parsed));
-                        return parse_success<ParserOutputs>(parsed_value, result.remaining);
+                        parsed_value.template emplace<i>(std::move(parsed));
+                        return parse_success<ParserOutputs>(parsed_value, remaining);
+                    }
+
+                    if (committed) {
+                        // committed failure, stop trying
+                        return parse_failure<ParserOutputs>(original_input);
                     }
                 }
 
@@ -417,6 +439,7 @@ namespace parser_combinators {
                 ReturnTupleType result_tuple{};
                 std::string_view parse_remaining = input;
 
+                bool has_committed = false;
                 constexpr auto member_index_map = make_member_index_map<SubParsers...>();
                 constexpr auto subparser_infos = std::array<std::meta::info, sizeof...(SubParsers)>{^^SubParsers...};
                 template for (constexpr int i : std::define_static_array(details::make_index_array<sizeof...(SubParsers)>())) {
@@ -424,10 +447,22 @@ namespace parser_combinators {
                     constexpr auto split = split_parser_decorator(subparser_infos[i]);
                     constexpr auto base_parser_info = split.first;
                     constexpr auto attr = split.second;
-                    auto [succ, parsed, remaining] = SubParser::parse(parse_remaining, ctx);
-                    if (!succ) {
-                        return parse_failure<ReturnTupleType>(input);
+                    auto [succ, committed, parsed, remaining] = SubParser::parse(parse_remaining, ctx);
+
+                    // at least one committed (either success or failure)
+                    if (committed) {
+                        has_committed = true;
                     }
+
+                    if (!succ) {
+                        auto res = parse_failure<ReturnTupleType>(input);
+                        // propagate committed status
+                        res.committed = has_committed;
+                        return res;
+                    }
+
+                    // at least one success, lock in committed status
+                    has_committed = true;
 
                     constexpr int target_idx = member_index_map[i];
                     if constexpr (target_idx != -1) {
@@ -487,6 +522,15 @@ namespace parser_combinators {
                 pw.basic_parser = std::meta::substitute(
                     ^^guard_parser,
                     {pw.basic_parser, std::meta::reflect_constant(Predicate)}
+                );
+                return pw;
+            }
+
+            consteval auto commit() const -> parser_wrapper {
+                parser_wrapper pw = *this;
+                pw.basic_parser = std::meta::substitute(
+                    ^^commit_parser,
+                    {pw.basic_parser}
                 );
                 return pw;
             }
