@@ -35,7 +35,39 @@ This benchmark is performed via a modified version which uses:
 
 I must say, that's pretty surprising... As all there are almost no hand-written boilerplates, just auto generated code via reflection.
 
-Here's an JSON parser example. Full code in `json_parser_example.cpp`.
+Here are some examples. 
+
+A simple parser which parses a sequence like `hellohello12345worldabc`:
+
+```cpp
+// the structure of the output sequence
+struct ParserOut {
+    int value1; // the digit 12345
+    std::string_view value2; // 'world'
+    std::variant<std::string_view, std::string_view> choice_value; // 'xyz' or 'abc'
+    // other values are discarded
+};
+
+// parses a digit
+constexpr auto digit = 
+    pc::dsl::numeric() // 0~9
+    .many().collect()  // make it a string sequence
+    | pc::dsl::guard<pc::preds::not_empty> // fail on empty strings
+    | pc::dsl::fmap<[](std::string_view s) { return std::stoi(std::string(s)); }>; // map into int. you can use any callable type here
+
+// use combine to parse a sequence
+constexpr auto parser = pc::dsl::combine<{
+        pc::dsl::symbol<"hello">().many().discard(), // many 'hello's, we just discard them
+        digit, // use a defined parser here
+        pc::dsl::symbol<"world">().expect<"There should be a 'world' here">(), // use expect to provide a verbose error message
+        pc::dsl::choice({ // one of 'xyz' and 'abc'
+            pc::dsl::symbol<"xyz">(),
+            pc::dsl::symbol<"abc">(),
+        }),
+    }>() | pc::dsl::fmap<pc::dsl::fmap_struct<ParserOut>>; // this will fill in the values in the sequence to the struct respectively
+```
+
+Json parser. Full code in `json_parser_example.cpp`.
 
 ```cpp
 using pc = parser_combinators;
