@@ -1,17 +1,41 @@
 # parser-combinators2
-Experimental parser combinator library with C++26 reflection.
+PoC parser combinator library with C++26 reflection.
 
-This is a lightweight, header-only parser combinator library designed for C++26. It leverages the P2996 reflection proposal to provide a declarative, DSL-like syntax for building efficient parsers at compile-time. You can define complex grammars with minimal boilerplate while maintaining high performance and type safety.
+This is a lightweight, header-only parser combinator library designed for C++26. It leverages the P2996 reflection proposal to provide a declarative, DSL-like syntax for building efficient parsers at compile-time. You can define complex grammars with minimal boilerplate while maintaining a relatively high performance and type safety.
 
 For debugging, the library includes a non-intrusive hook system. By performing apply_hook on a parser, you can automatically generate execution traces to monitor how the engine traverses your grammar.
 
 __Do not use this for production purposes.__
 
-The few benchmark I performed suggests that, even with many application-level optimizations, the JSON parser can only consume input at around 30MB/s. A plain parser without optimization can only consume at around 5MB/s, even with custom allocators.
-
 The parser generator itself utilizes `std::tuple` `std::variant` etc, which have extremely poor performance. Perhaps with reflection I can generate simple tuple/variant structs at compile time, thus preventing the standard library shit. And the Y-combinator seems to have poor performance as well, which is quite absurd.
 
-Here's an example. Full code in `json_parser_example.cpp`.
+Benchmark result with an 70MB JSON file:
+
+```
+Run on (8 X 1996 MHz CPU s)
+CPU Caches:
+  L1 Data 32 KiB (x8)
+  L1 Instruction 32 KiB (x8)
+  L2 Unified 512 KiB (x8)
+  L3 Unified 4096 KiB (x2)
+--------------------------------------------------------------------------------------------------------------------
+Benchmark                                                          Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------------
+BM_JsonParse_Win/iterations:30/repeats:5/threads:1_mean         1581 ms         1570 ms            5 bytes_per_second=49.8319Mi/s
+BM_JsonParse_Win/iterations:30/repeats:5/threads:1_median       1584 ms         1573 ms            5 bytes_per_second=49.7516Mi/s
+BM_JsonParse_Win/iterations:30/repeats:5/threads:1_stddev       7.82 ms         7.96 ms            5 bytes_per_second=258.784Ki/s
+BM_JsonParse_Win/iterations:30/repeats:5/threads:1_cv           0.49 %          0.51 %             5 bytes_per_second=0.51%
+```
+
+This benchmark is performed via a modified version which uses:
+
+- a lightweight variant container implemented by me
+- mimalloc as the global default allocator
+- some zero-copy strategies
+
+I must say, that's pretty surprising... As all there are almost no hand-written boilerplates, just auto generated code via reflection.
+
+Here's an JSON parser example. Full code in `json_parser_example.cpp`.
 
 ```cpp
 using pc = parser_combinators;
