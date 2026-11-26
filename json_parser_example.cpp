@@ -2,8 +2,11 @@
 
 #include "parser_combinators2.hpp"
 
-#include <map>
-#include <print>
+#include <algorithm>
+#include <cassert>
+#include <functional>
+#include <meta>
+#include <variant>
 
 namespace pc = parser_combinators;
 
