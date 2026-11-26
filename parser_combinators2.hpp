@@ -22,8 +22,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cassert>
+#include <functional>
 #include <meta>
+#include <variant>
 
 namespace parser_combinators {
     namespace details {
